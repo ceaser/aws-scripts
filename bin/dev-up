@@ -1,0 +1,236 @@
+#!/bin/bash
+
+################################################################################
+# Config
+################################################################################
+
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "jq is required" >&2
+  exit 1
+fi
+
+if ! command -v aws >/dev/null 2>&1; then
+  echo "awscli is required" >&2
+  exit 1
+fi
+
+if ! command -v netcat >/dev/null 2>&1; then
+  echo "netcat is required" >&2
+  exit 1
+fi
+
+if ! command -v ssh >/dev/null 2>&1; then
+  echo "ssh is required" >&2
+  exit 1
+fi
+
+CONFIG_PATH="$HOME/.dev-up/config"
+if [ -f "$CONFIG_PATH" ]
+then
+  . "$CONFIG_PATH"
+  AWS_ARGS="$AWS_ARGS --region $REGION"
+  NAME=$TAG_NAME
+
+elif [ "$1" != "configure" ]
+then
+  echo "Run '`basename $0` configure' to generate the configuration file located at '$CONFIG_PATH'" 1>&2
+  exit 1
+fi
+
+if [ "$1" == "configure" ]
+then
+  [ -f "$CONFIG_PATH" ] && echo "$CONFIG_PATH already exists." 1>&2 && exit 1
+
+  mkdir -p `dirname $CONFIG_PATH`
+
+(
+cat <<EOP
+TAG_NAME=NAME_REQUIRED
+# TAG_ANOTHER_TAG=SOMETHING
+
+# Ubuntu 16.04
+IMAGE_ID=ami-6e1a0117
+REGION=us-west-2
+INSTANCE_TYPE=t2.nano
+
+SECURITY_GROUP_IDS=REQUIRED_SECURITY_GROUP
+KEY_NAME=REQUIRED_KEY_NAME
+SUBNET_ID=REQUIRED_SUBNET_ID
+
+AWS_ARGS=""
+
+SSH_USER=ubuntu
+# if $CONFIG_PATH/user-data exists it will be used as user-data
+EOP
+) >> $CONFIG_PATH
+  chmod 600 $CONFIG_PATH
+
+  exit 0
+fi
+
+################################################################################
+# Describe Instance
+################################################################################
+echo -n "Getting existing instance id..." 1>&2
+JSON=$(aws ec2 describe-instances \
+  $AWS_ARGS \
+  --filters Name=tag:Name,Values=$NAME 2>/dev/null)
+
+INSTANCE_ID=$(echo $JSON | \
+  jq -rc 'select(.Reservations[].Instances[].State.Name != "terminated") | .Reservations[].Instances[].InstanceId')
+
+STATE=$(echo $JSON | \
+  jq -rc '.Reservations[].Instances[].State.Name')
+
+echo $INSTANCE_ID
+
+
+################################################################################
+# Status
+################################################################################
+if [ "$1" == "status" ]
+then
+  echo -n "Current instance state..." 1>&2
+  echo "$STATE"
+  exit 0
+fi
+
+################################################################################
+# envtags 'delete-tags|create=tags' $INSTANCE_ID
+################################################################################
+envtags() {
+  OLD_IFS=$IFS
+  IFS=$(echo -en "\n\b")
+  for line in $(set -o posix; set)
+  do
+    IFS="=" read -r n v <<< "$line"
+    if [ -z "${n##TAG*}" ]
+    then
+      set -x
+      tag_name="${n#TAG_}"
+      aws ec2 $1 $2 --resources $3 --tags "Key=$tag_name,Value=$v" 1>&2
+      exit 0
+    fi
+  done
+  IFS=$OLD_IFS
+}
+
+################################################################################
+# Destroy
+################################################################################
+if [ "$1" == "destroy" ]
+then
+  echo "Terminating Instance..." 1>&2
+  aws ec2 terminate-instances \
+    $AWS_ARGS \
+    --instance-ids $INSTANCE_ID 1>&2
+
+  ################################################################################
+  # Delete tags
+  ################################################################################
+  # TODO: DRY Code, Delete tags and Create tags are the same
+  OLD_IFS=$IFS
+  IFS=$(echo -en "\n\b")
+  for line in $(set -o posix; set)
+  do
+    IFS="=" read -r n v <<< "$line"
+    if [ -z "${n##TAG*}" ]
+    then
+      set -x
+      tag_name="${n#TAG_}"
+      aws ec2 delete-tags $AWS_ARGS --resources $INSTANCE_ID --tags "Key=$tag_name,Value=$v" 1>&2
+      exit 0
+    fi
+  done
+  IFS=$OLD_IFS
+  exit 0
+fi
+
+################################################################################
+# Create tags
+################################################################################
+if [ -z "$INSTANCE_ID" ]
+then
+
+	USER_DATA=""
+	if [ -f "$CONFIG_PATH/user-data" ]
+	then
+		USER_DATA="--user-data file://$CONFIG_PATH/user-data"
+	fi
+
+  echo -n "Running new instance..." 1>&2
+  INSTANCE_ID=$(aws ec2 run-instances \
+    $AWS_ARGS \
+    --image-id "$IMAGE_ID" \
+    --key-name $KEY_NAME \
+    --security-group-ids $SECURITY_GROUP_IDS \
+    --instance-type $INSTANCE_TYPE \
+    --subnet-id $SUBNET_ID \
+    --instance-initiated-shutdown-behavior stop \
+    $USER_DATA \
+    --count 1 \
+    | \
+    jq -rc '.Instances[].InstanceId'
+  )
+  echo $INSTANCE_ID
+
+  ################################################################################
+  # create tags
+  ################################################################################
+  # TODO: DRY Code, Delete tags and Create tags are the same
+  OLD_IFS=$IFS
+  IFS=$(echo -en "\n\b")
+  for line in $(set -o posix; set)
+  do
+    IFS="=" read -r n v <<< "$line"
+    if [ -z "${n##TAG*}" ]
+    then
+      set -x
+      tag_name="${n#TAG_}"
+      aws ec2 create-tags $AWS_ARGS --resources $INSTANCE_ID --tags "Key=$tag_name,Value=$v" 1>&2
+      exit 0
+    fi
+  done
+  IFS=$OLD_IFS
+  exit 0
+fi
+
+################################################################################
+#
+################################################################################
+IP=$(aws ec2 describe-instances \
+  $AWS_ARGS \
+  --instance-ids "$INSTANCE_ID" \
+  | \
+  jq -rc '.Reservations[].Instances[] | select(.PublicIpAddress != null and .PublicIpAddress != "") | .PublicIpAddress' )
+
+if [ -z "$IP" ]; then
+  echo -n "Starting Instance" 1>&2
+  aws ec2 start-instances $AWS_ARGS --instance-ids "$INSTANCE_ID" > /dev/null
+  echo "." 1>&2
+
+  echo -n "Waiting for instance to change to running state" 1>&2
+  aws ec2 wait instance-running $AWS_ARGS --instance-ids $INSTANCE_ID 1>&2
+  echo "." 1>&2
+
+  IP=$(aws ec2 describe-instances $AWS_ARGS --instance-ids "$INSTANCE_ID" | jq -rc '.Reservations[].Instances[] | select(.PublicIpAddress != null and .PublicIpAddress != "") | .PublicIpAddress' )
+fi
+echo -n "Getting ip address..." 1>&2
+echo "$IP" 1>&2
+
+echo "Waiting for server to become available" 1>&2
+while true
+do
+  netcat -w1 --zero  $IP 22 1>&2
+  if [ "$?" -eq "0" ]; then
+    break
+  else
+    echo -n "." 1>&2
+    sleep 1
+  fi
+done
+
+echo "Connecting..." 1>&2
+ssh -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null $SSH_USER@$IP
+
