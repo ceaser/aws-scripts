@@ -3,20 +3,24 @@ AWS Scripts
 
 Scripts of common AWS tasks.
 
-### Installing dependencies
+## Installing dependencies
 
-#### OS X
+### OS X
 ```
 brew install netcat jq awscli
 ```
 
-#### Ubuntu
+### Ubuntu
 ```
 sudo apt install jq awscli
 ```
 
-### Development on EC2
+## Development on EC2
 
 * dev-up - create, start or destroy a EC2 instance.
 * dev-down - destroy a EC2 instance.
 
+
+## License
+
+See [LICENSE](LICENSE).
