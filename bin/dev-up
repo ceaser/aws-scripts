@@ -1,11 +1,8 @@
 #!/bin/bash
 
-
 ################################################################################
 # Config
 ################################################################################
-
-
 if ! command -v jq >/dev/null 2>&1; then
   echo "jq is required" >&2
   exit 1
@@ -26,13 +23,14 @@ if ! command -v ssh >/dev/null 2>&1; then
   exit 1
 fi
 
+USER_DATA_PATH="$HOME/.dev-up/user-data"
 CONFIG_PATH="$HOME/.dev-up/config"
 if [ -f "$CONFIG_PATH" ]
 then
   . "$CONFIG_PATH"
 
   # Required variable validation
-  if [ -z "$TAG_NAME" ]; then echo "TAG_NAME is required but empty." 1>&2; exit 1; fi
+  if [ -z "$TAG_Name" ]; then echo "TAG_Name is required but empty." 1>&2; exit 1; fi
   if [ -z "$IMAGE_ID" ]; then echo "IMAGE_ID is required but empty." 1>&2; exit 1; fi
   if [ -z "$REGION" ]; then echo "REGION is required but empty." 1>&2; exit 1; fi
   if [ -z "$INSTANCE_TYPE" ]; then echo "INSTANCE_TYPE is required but empty." 1>&2; exit 1; fi
@@ -44,7 +42,7 @@ then
   # Default region or config region?
   if [ ! -z "$REGION" ]; then AWS_ARGS="$AWS_ARGS --region $REGION"; fi
 
-  NAME=$TAG_NAME
+  NAME=$TAG_Name
 
 elif [ "$1" != "configure" ]
 then
@@ -95,7 +93,7 @@ INSTANCE_TYPE=t2.nano
 SECURITY_GROUP_IDS=
 
 # Which key name to use for ssh authentication. If additional keys are
-# required. Create a $CONFIG_PATH/user-data script to add it after
+# required. Create a $USER_DATA_PATH script to add it after
 # launch.
 #
 # Example to list key names available:
@@ -120,7 +118,7 @@ AWS_ARGS=""
 # Required.
 SSH_USER=ubuntu
 
-# if $CONFIG_PATH/user-data exists it will be used as user-data
+# if $USER_DATA_PATH exists it will be used as user-data
 EOP
 ) >> $CONFIG_PATH
   chmod 600 $CONFIG_PATH
@@ -143,7 +141,11 @@ INSTANCE_ID=$(echo $JSON | \
 STATE=$(echo $JSON | \
   jq -rc '.Reservations[].Instances[].State.Name')
 
-echo $INSTANCE_ID
+if [ -z "$INSTANCE_ID" ]; then
+  echo "Not found" 1>&2
+else
+  echo $INSTANCE_ID
+fi
 
 ################################################################################
 # Status
@@ -156,34 +158,13 @@ then
 fi
 
 ################################################################################
-# envtags 'delete-tags|create=tags' $INSTANCE_ID
-################################################################################
-envtags() {
-  OLD_IFS=$IFS
-  IFS=$(echo -en "\n\b")
-  for line in $(set -o posix; set)
-  do
-    IFS="=" read -r n v <<< "$line"
-    if [ -z "${n##TAG*}" ]
-    then
-      set -x
-      tag_name="${n#TAG_}"
-      aws ec2 $1 $2 --resources $3 --tags "Key=$tag_name,Value=$v" 1>&2
-      exit 0
-    fi
-  done
-  IFS=$OLD_IFS
-}
-
-################################################################################
 # Destroy
 ################################################################################
 if [ "$1" == "destroy" ]
 then
-  echo "Terminating Instance..." 1>&2
-  aws ec2 terminate-instances \
-    $AWS_ARGS \
-    --instance-ids $INSTANCE_ID 1>&2
+  if [ -z "$INSTANCE_ID" ]; then
+    exit 0
+  fi
 
   ################################################################################
   # Delete tags
@@ -194,16 +175,20 @@ then
   for line in $(set -o posix; set)
   do
     IFS="=" read -r n v <<< "$line"
+    IFS=$OLD_IFS
     if [ -z "${n##TAG*}" ]
     then
-      set -x
       tag_name="${n#TAG_}"
       aws ec2 delete-tags $AWS_ARGS --resources $INSTANCE_ID --tags "Key=$tag_name,Value=$v" 1>&2
-      exit 0
     fi
   done
-  IFS=$OLD_IFS
+
+  echo "Terminating Instance..." 1>&2
+  aws ec2 terminate-instances \
+    $AWS_ARGS \
+    --instance-ids $INSTANCE_ID 2>/dev/null 1>&2
   exit 0
+
 fi
 
 ################################################################################
@@ -212,11 +197,10 @@ fi
 if [ -z "$INSTANCE_ID" ]
 then
 
-	USER_DATA=""
-	if [ -f "$CONFIG_PATH/user-data" ]
+	if [ -f "$USER_DATA_PATH" ]
 	then
-    echo "Using user-data file at $CONFIG_PATH/user-data " 1>&2
-    USER_DATA="--user-data file://$CONFIG_PATH/user-data"
+    echo "Using user-data file at $USER_DATA_PATH" 1>&2
+    USER_DATA="--user-data file://$USER_DATA_PATH"
 	fi
 
   echo -n "Running new instance..." 1>&2
@@ -235,7 +219,7 @@ then
   )
   echo $INSTANCE_ID
 
-  echo -n "Waiting for instance creation" 1>&2
+  echo "Waiting for instance to exist" 1>&2
   aws ec2 wait instance-exists $AWS_ARGS --instance-ids $INSTANCE_ID 1>&2
 
   ################################################################################
@@ -247,20 +231,17 @@ then
   for line in $(set -o posix; set)
   do
     IFS="=" read -r n v <<< "$line"
+    IFS=$OLD_IFS
     if [ -z "${n##TAG*}" ]
     then
-      set -x
       tag_name="${n#TAG_}"
       aws ec2 create-tags $AWS_ARGS --resources $INSTANCE_ID --tags "Key=$tag_name,Value=$v" 1>&2
-      exit 0
     fi
   done
-  IFS=$OLD_IFS
-  exit 0
 fi
 
 ################################################################################
-#
+# Connect
 ################################################################################
 IP=$(aws ec2 describe-instances \
   $AWS_ARGS \
@@ -287,6 +268,7 @@ while true
 do
   netcat -w1 --zero  $IP 22 1>&2
   if [ "$?" -eq "0" ]; then
+    echo "Available" 1>&2
     break
   else
     echo -n "." 1>&2
@@ -296,4 +278,3 @@ done
 
 echo "Connecting..." 1>&2
 ssh -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null $SSH_USER@$IP
-

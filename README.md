@@ -3,7 +3,20 @@ AWS Scripts
 
 Scripts of common AWS tasks.
 
-## Installing dependencies
+## Installation
+
+Run the following in your command-line:
+
+### OS X
+```sh
+brew tap ceaser/aws-scripts
+brew install aws-scripts
+```
+
+### Ubuntu
+TODO
+
+## Installing dependencies for development
 
 ### OS X
 ```
@@ -20,6 +33,8 @@ sudo apt install jq awscli
 * dev-up - create, start or destroy a EC2 instance.
 * dev-down - destroy a EC2 instance.
 
+## TODO
+[ ] Display more output when error occurs
 
 ## License
 
