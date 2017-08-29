@@ -1,5 +1,6 @@
 #!/bin/bash
 
+
 ################################################################################
 # Config
 ################################################################################
@@ -32,13 +33,15 @@ then
 
   # Required variable validation
   if [ -z "$TAG_NAME" ]; then echo "TAG_NAME is required but empty." 1>&2; exit 1; fi
+  if [ -z "$IMAGE_ID" ]; then echo "IMAGE_ID is required but empty." 1>&2; exit 1; fi
+  if [ -z "$REGION" ]; then echo "REGION is required but empty." 1>&2; exit 1; fi
+  if [ -z "$INSTANCE_TYPE" ]; then echo "INSTANCE_TYPE is required but empty." 1>&2; exit 1; fi
   if [ -z "$SECURITY_GROUP_IDS" ]; then echo "SECURITY_GROUP_IDS is required but empty." 1>&2; exit 1; fi
   if [ -z "$KEY_NAME" ]; then echo "KEY_NAME is required but empty." 1>&2; exit 1; fi
   if [ -z "$SUBNET_ID" ]; then echo "SUBNET_ID is required but empty." 1>&2; exit 1; fi
-  if [ -z "$SUBNET_ID" ]; then echo "SUBNET_ID is required but empty." 1>&2; exit 1; fi
+  if [ -z "$SSH_USER" ]; then echo "SSH_USER is required but empty." 1>&2; exit 1; fi
 
   # Default region or config region?
-  AWS_ARGS=""
   if [ ! -z "$REGION" ]; then AWS_ARGS="$AWS_ARGS --region $REGION"; fi
 
   NAME=$TAG_NAME
@@ -67,26 +70,45 @@ TAG_NAME=
 # TAG_ANOTHER_TAG=SOMETHING
 
 # IMAGE_ID are region dependent. Here is us-west-2's Ubuntu 16.04 IMAGE_ID
+#
 # Required.
 IMAGE_ID=ami-6e1a0117
+
 # AWS region
+#
+# Example to list regions available:
+# aws ec2 describe-regions | jq '.Regions[].RegionName'
 # Required.
 REGION=us-west-2
+
 # EC2 instance type
+#
 # Required.
 INSTANCE_TYPE=t2.nano
 
 # EC2 security group. Multiple groups are seperated by a comma
+#
+# Example to list security groups available:
+# aws ec2 describe-security-groups | jq '.SecurityGroups[].GroupId'
+#
 # Required.
 SECURITY_GROUP_IDS=
 
 # Which key name to use for ssh authentication. If additional keys are
 # required. Create a $CONFIG_PATH/user-data script to add it after
 # launch.
+#
+# Example to list key names available:
+# aws ec2 describe-key-pairs | jq '.KeyPairs[].KeyName'
+#
 # Required.
 KEY_NAME=
 
-# EC2 subnet
+# EC2 subnet.
+#
+# Example to list subnets available:
+# aws ec2 describe-subnets | jq '.Subnets[].SubnetId'
+#
 # Required.
 SUBNET_ID=
 
@@ -94,6 +116,7 @@ SUBNET_ID=
 AWS_ARGS=""
 
 # The user for ssh connections
+#
 # Required.
 SSH_USER=ubuntu
 
@@ -121,7 +144,6 @@ STATE=$(echo $JSON | \
   jq -rc '.Reservations[].Instances[].State.Name')
 
 echo $INSTANCE_ID
-
 
 ################################################################################
 # Status
@@ -193,7 +215,8 @@ then
 	USER_DATA=""
 	if [ -f "$CONFIG_PATH/user-data" ]
 	then
-		USER_DATA="--user-data file://$CONFIG_PATH/user-data"
+    echo "Using user-data file at $CONFIG_PATH/user-data " 1>&2
+    USER_DATA="--user-data file://$CONFIG_PATH/user-data"
 	fi
 
   echo -n "Running new instance..." 1>&2
@@ -211,6 +234,9 @@ then
     jq -rc '.Instances[].InstanceId'
   )
   echo $INSTANCE_ID
+
+  echo -n "Waiting for instance creation" 1>&2
+  aws ec2 wait instance-exists $AWS_ARGS --instance-ids $INSTANCE_ID 1>&2
 
   ################################################################################
   # create tags
