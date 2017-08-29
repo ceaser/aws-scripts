@@ -29,12 +29,24 @@ CONFIG_PATH="$HOME/.dev-up/config"
 if [ -f "$CONFIG_PATH" ]
 then
   . "$CONFIG_PATH"
-  AWS_ARGS="$AWS_ARGS --region $REGION"
+
+  # Required variable validation
+  if [ -z "$TAG_NAME" ]; then echo "TAG_NAME is required but empty." 1>&2; exit 1; fi
+  if [ -z "$SECURITY_GROUP_IDS" ]; then echo "SECURITY_GROUP_IDS is required but empty." 1>&2; exit 1; fi
+  if [ -z "$KEY_NAME" ]; then echo "KEY_NAME is required but empty." 1>&2; exit 1; fi
+  if [ -z "$SUBNET_ID" ]; then echo "SUBNET_ID is required but empty." 1>&2; exit 1; fi
+  if [ -z "$SUBNET_ID" ]; then echo "SUBNET_ID is required but empty." 1>&2; exit 1; fi
+
+  # Default region or config region?
+  AWS_ARGS=""
+  if [ ! -z "$REGION" ]; then AWS_ARGS="$AWS_ARGS --region $REGION"; fi
+
   NAME=$TAG_NAME
 
 elif [ "$1" != "configure" ]
 then
   echo "Run '`basename $0` configure' to generate the configuration file located at '$CONFIG_PATH'" 1>&2
+  echo "Also make sure awscli is configured and working properly. If not run 'aws configure'" 1>&2
   exit 1
 fi
 
@@ -46,21 +58,45 @@ then
 
 (
 cat <<EOP
-TAG_NAME=NAME_REQUIRED
+# The name of the EC2 instance to start and resume
+# Required.
+TAG_NAME=
+
+# Additional tags are added by the TAG_ prefix. The key name is after the
+# prefix. The value is the value
 # TAG_ANOTHER_TAG=SOMETHING
 
-# Ubuntu 16.04
+# IMAGE_ID are region dependent. Here is us-west-2's Ubuntu 16.04 IMAGE_ID
+# Required.
 IMAGE_ID=ami-6e1a0117
+# AWS region
+# Required.
 REGION=us-west-2
+# EC2 instance type
+# Required.
 INSTANCE_TYPE=t2.nano
 
-SECURITY_GROUP_IDS=REQUIRED_SECURITY_GROUP
-KEY_NAME=REQUIRED_KEY_NAME
-SUBNET_ID=REQUIRED_SUBNET_ID
+# EC2 security group. Multiple groups are seperated by a comma
+# Required.
+SECURITY_GROUP_IDS=
 
+# Which key name to use for ssh authentication. If additional keys are
+# required. Create a $CONFIG_PATH/user-data script to add it after
+# launch.
+# Required.
+KEY_NAME=
+
+# EC2 subnet
+# Required.
+SUBNET_ID=
+
+# Additional options for all aws calls
 AWS_ARGS=""
 
+# The user for ssh connections
+# Required.
 SSH_USER=ubuntu
+
 # if $CONFIG_PATH/user-data exists it will be used as user-data
 EOP
 ) >> $CONFIG_PATH
@@ -68,6 +104,7 @@ EOP
 
   exit 0
 fi
+
 
 ################################################################################
 # Describe Instance
