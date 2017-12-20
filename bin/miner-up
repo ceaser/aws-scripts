@@ -13,8 +13,8 @@ if ! command -v aws >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! command -v netcat >/dev/null 2>&1; then
-  echo "netcat is required" >&2
+if ! command -v nc >/dev/null 2>&1; then
+  echo "nc is required" >&2
   exit 1
 fi
 
@@ -398,7 +398,7 @@ function connect_to_instance() {
   echo "Waiting for server to become available" 1>&2
   while true
   do
-    netcat -w 1 -z $IP 22 1>&2 2>/dev/null
+    nc -w 1 -z $IP 22 1>&2 2>/dev/null
     if [ "$?" -eq "0" ]; then
       echo "." 1>&2
       break
