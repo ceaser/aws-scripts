@@ -67,6 +67,9 @@ then
 
 (
 cat <<EOP
+# TODO: Add the comments
+# ACCOUNT_ID=
+
 # The name of the EC2 instance to start and resume
 # Required.
 TAG_Name=
@@ -143,8 +146,7 @@ function create_spot_instance() {
     --product-descriptions "$SPOT_PRODUCT_DESCRIPTION" \
     --start-time `date +%s` \
     | \
-    jq --raw-output \
-    '.SpotPriceHistory|=sort_by(.SpotPrice)|first(.SpotPriceHistory[].SpotPrice), first(.SpotPriceHistory[].AvailabilityZone)'
+    jq --raw-output '.SpotPriceHistory|=sort_by(.SpotPrice)|first(.SpotPriceHistory[].SpotPrice), first(.SpotPriceHistory[].AvailabilityZone)'
   )
   [ -z "$PRICE_AND_ZONE" ] && echo "Can not get spot pricing for: '$SPOT_PRODUCT_DESCRIPTION'" 1>&2 && exit 1
 
@@ -168,8 +170,9 @@ function create_spot_instance() {
     $AWS_ARGS \
     --spot-price $SPOT_PRICE_MAX \
     --launch-specification " {
-    \"SecurityGroupIds\": [\"$SECURITY_GROUP_IDS\"],
     \"ImageId\": \"$IMAGE_ID\",
+    \"SubnetId\": \"${SUBNET_ID}\",
+    \"SecurityGroupIds\": [\"$SECURITY_GROUP_IDS\"],
     \"InstanceType\": \"$INSTANCE_TYPE\",
     \"Placement\": {
       \"AvailabilityZone\": \"$ZONE\"
@@ -290,12 +293,12 @@ function create_volume() {
 		# TODO: Test on OS X
 		readarray -t snapshot_data <<< "$snapshot_data"
 
-		snapshot_id=${snapshot[0]}
-		volume_size=${snapshot[1]}
+		snapshot_id=${snapshot_data[0]}
+		volume_size=${snapshot_data[1]}
 		# The original volume
-		volume_id=${snapshot[2]}
-		progress=${snapshot[3]}
-		desc=${snapshot[4]}
+		volume_id=${snapshot_data[2]}
+		progress=${snapshot_data[3]}
+		desc=${snapshot_data[4]}
 
 		# Check if the snapshot is ready
 		# AWS adds " to the progress
@@ -345,7 +348,7 @@ function create_volume() {
 
 			attaching)
 				echo -n "Waiting for volume to attach" 1>&2
-			  aws ec2 wait volume-in-use $AWS_ARGS --no-dry-run --volume-ids $volume_id 1>&2
+				aws ec2 wait volume-available $AWS_ARGS --no-dry-run --volume-ids $volume_id 1>&2
 				;;
 
 			detaching)
@@ -516,4 +519,4 @@ then
 fi
 
 create_volume
-#connect_to_instance
+connect_to_instance
