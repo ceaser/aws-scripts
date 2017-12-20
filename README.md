@@ -25,7 +25,7 @@ brew install netcat jq awscli
 
 ### Ubuntu
 ```
-sudo apt install jq awscli
+sudo apt install jq awscli bc
 ```
 
 ## Development on EC2

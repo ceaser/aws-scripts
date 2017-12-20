@@ -1,0 +1,519 @@
+#!/bin/bash
+
+################################################################################
+# Config
+################################################################################
+if ! command -v jq >/dev/null 2>&1; then
+  echo "jq is required" >&2
+  exit 1
+fi
+
+if ! command -v aws >/dev/null 2>&1; then
+  echo "awscli is required" >&2
+  exit 1
+fi
+
+if ! command -v netcat >/dev/null 2>&1; then
+  echo "netcat is required" >&2
+  exit 1
+fi
+
+if ! command -v ssh >/dev/null 2>&1; then
+  echo "ssh is required" >&2
+  exit 1
+fi
+
+if ! command -v bc >/dev/null 2>&1; then
+  echo "bc is required" >&2
+  exit 1
+fi
+ZONE=
+USER_DATA_PATH="$HOME/.aws-up/user-data"
+CONFIG_PATH="$HOME/.aws-up/config"
+if [ -f "$CONFIG_PATH" ]
+then
+  . "$CONFIG_PATH"
+
+  # Required variable validation
+  if [ -z "$ACCOUNT_ID" ]; then echo "ACCOUNT_ID is required but empty." 1>&2; exit 1; fi
+  if [ "$SPOT_INSTANCE" == "true" ] && [ -z "$SPOT_PRODUCT_DESCRIPTION"  ]; then echo "Spot instance requires $SPOT_PRODUCT_DESCRIPTION but it is empty." 1>&2; exit 1; fi
+  if [ -z "$TAG_Name" ]; then echo "TAG_Name is required but empty." 1>&2; exit 1; fi
+  if [ -z "$IMAGE_ID" ]; then echo "IMAGE_ID is required but empty." 1>&2; exit 1; fi
+  if [ -z "$REGION" ]; then echo "REGION is required but empty." 1>&2; exit 1; fi
+  if [ -z "$INSTANCE_TYPE" ]; then echo "INSTANCE_TYPE is required but empty." 1>&2; exit 1; fi
+  if [ -z "$SECURITY_GROUP_IDS" ]; then echo "SECURITY_GROUP_IDS is required but empty." 1>&2; exit 1; fi
+  if [ -z "$KEY_NAME" ]; then echo "KEY_NAME is required but empty." 1>&2; exit 1; fi
+  if [ -f "~/.ssh/$KEY_NAME.pem" ]; then echo ""~/.ssh/$KEY_NAME.pem" isn't found." 1>&2; exit 1; fi
+  if [ -z "$SUBNET_ID" ]; then echo "SUBNET_ID is required but empty." 1>&2; exit 1; fi
+  if [ -z "$SSH_USER" ]; then echo "SSH_USER is required but empty." 1>&2; exit 1; fi
+
+  # Default region or config region?
+  if [ ! -z "$REGION" ]; then AWS_ARGS="$AWS_ARGS --region $REGION"; fi
+
+  NAME=$TAG_Name
+
+elif [ "$1" != "configure" ]
+then
+  echo "Run '`basename $0` configure' to generate the configuration file located at '$CONFIG_PATH'" 1>&2
+  echo "Also make sure awscli is configured and working properly. If not run 'aws configure'" 1>&2
+  exit 1
+fi
+
+if [ "$1" == "configure" ]
+then
+  [ -f "$CONFIG_PATH" ] && echo "$CONFIG_PATH already exists." 1>&2 && exit 1
+
+  mkdir -p `dirname $CONFIG_PATH`
+
+(
+cat <<EOP
+# The name of the EC2 instance to start and resume
+# Required.
+TAG_Name=
+
+# Additional tags are added by the TAG_ prefix. The key name is after the
+# prefix. The value is the value
+# TAG_ANOTHER_TAG=SOMETHING
+
+# IMAGE_ID are region dependent. Here is us-west-2's Ubuntu 16.04 IMAGE_ID
+#
+# Required.
+IMAGE_ID=ami-6e1a0117
+
+# AWS region
+#
+# Example to list regions available:
+# aws ec2 describe-regions | jq '.Regions[].RegionName'
+# Required.
+REGION=us-west-2
+
+# EC2 instance type
+#
+# Required.
+INSTANCE_TYPE=t2.nano
+
+# EC2 security group. Multiple groups are seperated by a comma
+#
+# Example to list security groups available:
+# aws ec2 describe-security-groups | jq '.SecurityGroups[] | { "id": .GroupId, "name": .GroupName, "description": .Description } '
+r
+#
+# Required.
+SECURITY_GROUP_IDS=
+
+# Which key name to use for ssh authentication. If additional keys are
+# required. Create a $USER_DATA_PATH script to add it after
+# launch.
+#
+# Example to list key names available:
+# aws ec2 describe-key-pairs | jq '.KeyPairs[].KeyName'
+#
+# Required.
+KEY_NAME=
+
+# EC2 subnet.
+#
+# Example to list subnets available:
+# aws ec2 describe-subnets | jq '.Subnets[]'
+#
+# Required.
+SUBNET_ID=
+
+# Additional options for all aws calls
+AWS_ARGS=""
+
+# The user for ssh connections
+#
+# Required.
+SSH_USER=ubuntu
+
+# if $USER_DATA_PATH exists it will be used as user-data
+EOP
+) >> $CONFIG_PATH
+  chmod 600 $CONFIG_PATH
+
+  exit 0
+fi
+
+function create_spot_instance() {
+  echo "Getting current spot pricing a $SPOT_PRODUCT_DESCRIPTION: '$INSTANCE_TYPE'" 1>&2
+  PRICE_AND_ZONE=$(aws ec2 describe-spot-price-history \
+    $AWS_ARGS --no-dry-run \
+    --instance-types $INSTANCE_TYPE \
+    --product-descriptions "$SPOT_PRODUCT_DESCRIPTION" \
+    --start-time `date +%s` \
+    | \
+    jq --raw-output \
+    '.SpotPriceHistory|=sort_by(.SpotPrice)|first(.SpotPriceHistory[].SpotPrice), first(.SpotPriceHistory[].AvailabilityZone)'
+  )
+  [ -z "$PRICE_AND_ZONE" ] && echo "Can not get spot pricing for: '$SPOT_PRODUCT_DESCRIPTION'" 1>&2 && exit 1
+
+  # Convert to array. This was broken on ubuntu
+  # TODO: Test on OSX
+  readarray -t PRICE_AND_ZONE <<< "$PRICE_AND_ZONE"
+
+  PRICE=${PRICE_AND_ZONE[0]}
+  ZONE=${PRICE_AND_ZONE[1]}
+
+  echo "Lowest Price: $PRICE" 1>&2
+  if [ -z "$SPOT_PRICE_MAX" ]
+  then
+    SPOT_PRICE_MAX=$( bc <<< "$PRICE * 0.50 + $PRICE" )
+    echo "Calculating Spot Price...$SPOT_PRICE_MAX" 1>&2
+  fi
+  echo "Availablility Zone: $ZONE" 1>&2
+  echo -n "Requesting spot instance..." 1>&2
+
+  SPOT_INSTANCE_ID=$( aws ec2 request-spot-instances \
+    $AWS_ARGS \
+    --spot-price $SPOT_PRICE_MAX \
+    --launch-specification " {
+    \"SecurityGroupIds\": [\"$SECURITY_GROUP_IDS\"],
+    \"ImageId\": \"$IMAGE_ID\",
+    \"InstanceType\": \"$INSTANCE_TYPE\",
+    \"Placement\": {
+      \"AvailabilityZone\": \"$ZONE\"
+    }
+  }" \
+  | \
+  jq --raw-output \
+  '.SpotInstanceRequests[0].SpotInstanceRequestId' )
+  [ "$?" != "0" ] && echo "Could not request a spot instance" 1>&2 && exit 1
+
+  echo $SPOT_INSTANCE_ID 1>&2
+
+  echo -n "Waiting for instance to be launched... " 1>&2
+  aws ec2 $AWS_ARGS --no-dry-run wait spot-instance-request-fulfilled --spot-instance-request-ids "$SPOT_INSTANCE_ID"
+  [ "$?" != "0" ] && echo "Could not request a spot instance" 1>&2 && exit 1
+
+  echo -n "Getting instance id..." 1>&2
+  INSTANCE_ID=$( aws ec2 describe-spot-instance-requests \
+    $AWS_ARGS --no-dry-run \
+    --spot-instance-request-ids "$SPOT_INSTANCE_ID"
+    | \
+    jq --raw-output '.SpotInstanceRequests[0].InstanceId'
+  )
+  echo "$INSTANCE_ID" 1>&2
+}
+
+create_ondemand_instance() {
+  echo -n "Running new instance..." 1>&2
+  INSTANCE_ID=$(aws ec2 run-instances \
+    $AWS_ARGS  \
+    --image-id "$IMAGE_ID" \
+    --key-name $KEY_NAME \
+    --security-group-ids $SECURITY_GROUP_IDS \
+    --instance-type $INSTANCE_TYPE \
+    --subnet-id $SUBNET_ID \
+    --instance-initiated-shutdown-behavior stop \
+    $USER_DATA \
+    --count 1 \
+    | \
+    jq -rc '.Instances[].InstanceId'
+  )
+  [ "$?" != "0" ] && exit 1
+  echo $INSTANCE_ID
+  [ -z "$INSTANCE_ID" ] && exit 1
+
+  echo "Waiting for instance to exist" 1>&2
+  aws ec2 wait instance-exists $AWS_ARGS --no-dry-run --instance-ids $INSTANCE_ID 1>&2
+  [ "$?" != "0" ] && exit 1
+}
+
+function create_tags() {
+	[ -z "$INSTANCE_ID" ] && echo "Can not create tags. Instance ID is blank" 1>&2 && exit 1
+  ################################################################################
+  # create tags
+  ################################################################################
+  # TODO: DRY Code, Delete tags and Create tags are the same
+  OLD_IFS=$IFS
+  IFS=$(echo -en "\n\b")
+  for line in $(set -o posix; set)
+  do
+    IFS="=" read -r n v <<< "$line"
+    IFS=$OLD_IFS
+    if [ -z "${n##TAG*}" ]
+    then
+      tag_name="${n#TAG_}"
+      aws ec2 create-tags $AWS_ARGS --no-dry-run --resources $INSTANCE_ID --tags "Key=$tag_name,Value=$v" 1>&2
+    fi
+  done
+}
+
+function delete_tags() {
+	[ -z "$INSTANCE_ID" ] && echo "Can not create tags. Instance ID is blank" 1>&2 && exit 1
+  ################################################################################
+  # Delete tags
+  ################################################################################
+  # TODO: DRY Code, Delete tags and Create tags are the same
+  OLD_IFS=$IFS
+  IFS=$(echo -en "\n\b")
+  for line in $(set -o posix; set)
+  do
+    IFS="=" read -r n v <<< "$line"
+    IFS=$OLD_IFS
+    if [ -z "${n##TAG*}" ]
+    then
+      tag_name="${n#TAG_}"
+      aws ec2 delete-tags $AWS_ARGS --no-dry-run --resources $INSTANCE_ID --tags "Key=$tag_name,Value=$v" 1>&2
+    fi
+  done
+}
+
+function create_volume() {
+	local snapshot_id
+	local name
+	local state
+
+	# Get all volumes
+	VOLUMES=$(aws ec2 describe-volumes \
+		$AWS_ARGS --no-dry-run
+	)
+
+	# For each name of the snapshots owned by the account
+	for name in $(aws ec2 describe-snapshots \
+		$AWS_ARGS --no-dry-run \
+		--owner-ids="$ACCOUNT_ID" \
+		| \
+		jq -r '.Snapshots[] | .Tags[] | select(.Key == "Name" ) | .Value'
+		)
+	do
+		# Get the latest snapshot
+	  snapshot=$(aws ec2 describe-snapshots \
+	  	$AWS_ARGS --no-dry-run \
+	  	--owner-ids="$ACCOUNT_ID" \
+	  	--filters=Name=tag:Name,Values=$name
+	  )
+
+	  snapshot_data=$(echo $snapshot | jq -r '.Snapshots[] | .SnapshotId, .VolumeSize, .VolumeId, .Progress, .Description')
+
+		# TODO: Test on OS X
+		readarray -t snapshot_data <<< "$snapshot_data"
+
+		snapshot_id=${snapshot[0]}
+		volume_size=${snapshot[1]}
+		# The original volume
+		volume_id=${snapshot[2]}
+		progress=${snapshot[3]}
+		desc=${snapshot[4]}
+
+		# Check if the snapshot is ready
+		# AWS adds " to the progress
+		[ "$progress" == "100%" ] || (echo "The latest snapshot of $name ($desc) is not complete. $progress"  && continue)
+
+		echo "$VOLUMES" | grep "$name" >/dev/null
+
+		# Previous program returns 1 when it can't find the volume name
+		if [ "$?" == "1" ]
+		then
+			# Restore from the snapshot if it doesn't exists
+			echo -n "Creating volume $volume_size from $name ($desc)..." 1>&2
+			volume_id=$(aws ec2 create-volume \
+				$AWS_ARGS \
+				--size $volume_size \
+				--snapshot-id $snapshot_id \
+				--availability-zone $ZONE \
+				--volume-type gp2 \
+				| \
+				jq -r '.VolumeId'
+			)
+			[ -z "$volume_id" ] && continue
+
+			aws ec2 create-tags $AWS_ARGS --resources $volume_id --tags "Key=Name,Value=$name" 1>&2
+			echo "OK" 1>&2
+		else
+			volume_tags=$(echo $VOLUMES | jq -r '.Volumes[] | select(.Tags) | {(.VolumeId | tostring):(.Tags | from_entries)}')
+			volume_id=$(echo $volume_tags | jq -r --arg name $name 'select(any(.Name == $name)) | keys | first')
+		fi
+
+		[ -z "$volume_id" ] && echo "Error occured: can not find the VolumeId" 1>&2 && continue
+		[ -z "$INSTANCE_ID" ] && echo "Error occured: no InstanceId" 1>&2 && exit 1
+
+		device=$(echo $snapshot | jq -r --arg name $name '.Snapshots[] | select(.Tags) | .Tags | from_entries | select(.Name == $name) | .Device')
+
+		state=$(echo "$VOLUMES" | jq -r ".Volumes[].Attachments[] | select(.VolumeId == \"$volume_id\") | .State")
+
+		case $state in
+			attached)
+				echo "Volume $name ($volume_id) already attached" 1>&2
+				continue
+				;;
+
+			detached)
+				echo -n "Attaching volume $name ($volume_id)..." 1>&2
+			  ;;
+
+			attaching)
+				echo -n "Waiting for volume to attach" 1>&2
+			  aws ec2 wait volume-in-use $AWS_ARGS --no-dry-run --volume-ids $volume_id 1>&2
+				;;
+
+			detaching)
+				echo -n "Waiting for volume to detach before attaching again..." 1>&2
+				aws ec2 wait volume-available $AWS_ARGS --no-dry-run --volume-ids $volume_id 1>&2
+				;;
+
+			*)
+				echo -n "Attaching volume $name ($volume_id)..." 1>&2
+				;;
+		esac
+
+		# Attach volumes
+		aws ec2 attach-volume \
+			$AWS_ARGS --no-dry-run \
+		  --volume-id ${volume_id} \
+		  --instance-id ${INSTANCE_ID} \
+			--device $device \
+			>/dev/null
+	done
+}
+
+function connect_to_instance() {
+  ################################################################################
+  # Connect
+  ################################################################################
+  IP=$(aws ec2 describe-instances \
+    $AWS_ARGS --no-dry-run \
+    --instance-ids "$INSTANCE_ID" \
+    | \
+    jq -rc '.Reservations[].Instances[] | select(.PublicIpAddress != null and .PublicIpAddress != "") | .PublicIpAddress' )
+
+  if [ -z "$IP" ]; then
+    echo -n "Starting Instance" 1>&2
+    aws ec2 start-instances $AWS_ARGS --instance-ids "$INSTANCE_ID" > /dev/null
+    echo "." 1>&2
+
+    echo -n "Waiting for instance to change to running state" 1>&2
+    aws ec2 wait instance-running $AWS_ARGS --no-dry-run --instance-ids $INSTANCE_ID 1>&2
+    echo "." 1>&2
+
+    IP=$(aws ec2 describe-instances $AWS_ARGS --no-dry-run --instance-ids "$INSTANCE_ID" | jq -rc '.Reservations[].Instances[] | select(.PublicIpAddress != null and .PublicIpAddress != "") | .PublicIpAddress' )
+  fi
+  echo -n "Getting ip address..." 1>&2
+  echo "$IP" 1>&2
+
+  echo "Waiting for server to become available" 1>&2
+  while true
+  do
+    netcat -w 1 -z $IP 22 1>&2 2>/dev/null
+    if [ "$?" -eq "0" ]; then
+      echo "." 1>&2
+      break
+    else
+      echo -n "." 1>&2
+      sleep 1
+    fi
+  done
+
+  echo "Connecting..." 1>&2
+  ssh -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null -i ~/.ssh/$KEY_NAME.pem $SSH_USER@$IP
+}
+
+################################################################################
+# Describe Instance
+################################################################################
+echo -n "Looking for existing instance id..." 1>&2
+instance=$(aws ec2 describe-instances \
+  $AWS_ARGS --no-dry-run \
+  --filters Name=tag:Name,Values=$NAME 2>/dev/null \
+ | \
+  jq -rc '.Reservations[].Instances[] | .InstanceId, .State.Name, .Placement.AvailabilityZone'
+)
+
+readarray -t instance <<< "$instance"
+INSTANCE_ID=${instance[0]}
+STATE=${instance[1]}
+ZONE=${instance[2]}
+
+if [ -z "$INSTANCE_ID" ]; then
+  echo "Not found" 1>&2
+else
+  echo $INSTANCE_ID
+fi
+
+echo "Current instance state...$STATE" 1>&2
+case $STATE in
+	#running)
+		# TODO: Optimize start up if it's running already.
+		#;;
+
+	#stopped)
+		# TODO: Optimize start up if it's running already.
+  	#;;
+
+	pending)
+		aws ec2 wait instance-running $AWS_ARGS --no-dry-run --instance-ids $INSTANCE_ID 1>&2
+		;;
+
+	shutting-down)
+		# We need to clear INSTANCE_ID in order to create a new instance
+  	aws ec2 wait instance-terminated $AWS_ARGS --no-dry-run --instance-ids $INSTANCE_ID 1>&2
+		unset INSTANCE_ID
+		;;
+
+	stopping)
+		# Wait for shutdown
+  	aws ec2 wait instance-stopped $AWS_ARGS --no-dry-run --instance-ids $INSTANCE_ID 1>&2
+		# Start
+		;;
+
+	terminated)
+		# We need to clear INSTANCE_ID in order to create a new instance
+		unset INSTANCE_ID
+		;;
+esac
+
+
+################################################################################
+# Status
+################################################################################
+if [ "$1" == "status" ]
+then
+  echo -n "Current instance state..." 1>&2
+  echo "$STATE"
+  exit 0
+fi
+
+################################################################################
+# Destroy
+################################################################################
+if [ "$1" == "destroy" ]
+then
+  if [ -z "$INSTANCE_ID" ]; then
+    exit 0
+  fi
+
+  delete_tags
+
+  echo "Terminating Instance..." 1>&2
+  aws ec2 terminate-instances \
+    $AWS_ARGS \
+    --instance-ids $INSTANCE_ID 2>/dev/null 1>&2
+  exit 0
+
+fi
+
+################################################################################
+# Create
+################################################################################
+if [ -z "$INSTANCE_ID" ]
+then
+
+	if [ -f "$USER_DATA_PATH" ]
+	then
+    echo "Using user-data file at $USER_DATA_PATH" 1>&2
+    USER_DATA="--user-data file://$USER_DATA_PATH"
+	fi
+
+  if [ "$SPOT_INSTANCE" == "true" ]
+  then
+    create_spot_instance
+  else
+    create_ondemand_instance
+  fi
+
+  create_tags
+fi
+
+create_volume
+#connect_to_instance
