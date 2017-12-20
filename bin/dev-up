@@ -23,8 +23,8 @@ if ! command -v ssh >/dev/null 2>&1; then
   exit 1
 fi
 
-USER_DATA_PATH="$HOME/.dev-up/user-data"
-CONFIG_PATH="$HOME/.dev-up/config"
+USER_DATA_PATH="$HOME/.aws-up/user-data"
+CONFIG_PATH="$HOME/.aws-up/config"
 if [ -f "$CONFIG_PATH" ]
 then
   . "$CONFIG_PATH"
