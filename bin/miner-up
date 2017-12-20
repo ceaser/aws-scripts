@@ -363,7 +363,7 @@ function create_volume() {
 
 		# Attach volumes
 		aws ec2 attach-volume \
-			$AWS_ARGS --no-dry-run \
+			$AWS_ARGS  \
 		  --volume-id ${volume_id} \
 		  --instance-id ${INSTANCE_ID} \
 			--device $device \
