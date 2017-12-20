@@ -27,6 +27,11 @@ if ! command -v bc >/dev/null 2>&1; then
   echo "bc is required" >&2
   exit 1
 fi
+#if ! command -v readarray >/dev/null 2>&1; then
+#  echo "readarray is required" >&2
+#  exit 1
+#fi
+
 ZONE=
 USER_DATA_PATH="$HOME/.aws-up/user-data"
 CONFIG_PATH="$HOME/.aws-up/config"
@@ -152,7 +157,22 @@ function create_spot_instance() {
 
   # Convert to array. This was broken on ubuntu
   # TODO: Test on OSX
-  readarray -t PRICE_AND_ZONE <<< "$PRICE_AND_ZONE"
+
+  if  command -v readarray >/dev/null 2>&1; then
+    readarray -t PRICE_AND_ZONE <<< "$PRICE_AND_ZONE"
+  else
+    OLD_PRICE_AND_ZONE=$PRICE_AND_ZONE
+    PRICE_AND_ZONE=()
+
+    OLD_IFS=$IFS
+    IFS=$(echo -en "\n\b")
+    for line in $OLD_PRICE_AND_ZONE
+    do
+      IFS="=" read -r n <<< "$line"
+      IFS=$OLD_IFS
+      PRICE_AND_ZONE+=($n)
+    done
+  fi
 
   PRICE=${PRICE_AND_ZONE[0]}
   ZONE=${PRICE_AND_ZONE[1]}
@@ -291,12 +311,26 @@ function create_volume() {
 	  snapshot_data=$(echo $snapshot | jq -r '.Snapshots[] | .SnapshotId, .VolumeSize, .VolumeId, .Progress, .Description')
 
 		# TODO: Test on OS X
-		readarray -t snapshot_data <<< "$snapshot_data"
+    if command -v readarray >/dev/null 2>&1; then
+      readarray -t snapshot_data <<< "$snapshot_data"
+    else
+      old_snapshot_data=$snapshot_data
+      snapshot_data=()
+
+      OLD_IFS=$IFS
+      IFS=$(echo -en "\n\b")
+      for line in $old_snapshot_data
+      do
+        IFS="=" read -r n <<< "$line"
+        IFS=$OLD_IFS
+        snapshot_data+=($n)
+      done
+    fi
 
 		snapshot_id=${snapshot_data[0]}
 		volume_size=${snapshot_data[1]}
 		# The original volume
-		volume_id=${snapshot_data[2]}
+		#volume_id=${snapshot_data[2]}
 		progress=${snapshot_data[3]}
 		desc=${snapshot_data[4]}
 
@@ -304,10 +338,12 @@ function create_volume() {
 		# AWS adds " to the progress
 		[ "$progress" == "100%" ] || (echo "The latest snapshot of $name ($desc) is not complete. $progress"  && continue)
 
-		echo "$VOLUMES" | grep "$name" >/dev/null
+    device=$(echo $snapshot | jq -r --arg name $name '.Snapshots[] | select(.Tags) | .Tags | from_entries | select(.Name == $name) | .Device')
+    file_sytem=$(echo $snapshot | jq -r --arg name $name '.Snapshots[] | select(.Tags) | .Tags | from_entries | select(.Name == $name) | .FileSystem')
+    tags=$(echo $VOLUMES | jq -r --arg name $name '.Volumes[] | select(.Tags) | .Tags | from_entries | select(.Name == $name)')
 
-		# Previous program returns 1 when it can't find the volume name
-		if [ "$?" == "1" ]
+		# If no tags the volume doesn't exist
+		if [ -z "$tags" ]
 		then
 			# Restore from the snapshot if it doesn't exists
 			echo -n "Creating volume $volume_size from $name ($desc)..." 1>&2
@@ -322,17 +358,18 @@ function create_volume() {
 			)
 			[ -z "$volume_id" ] && continue
 
-			aws ec2 create-tags $AWS_ARGS --resources $volume_id --tags "Key=Name,Value=$name" 1>&2
-			echo "OK" 1>&2
-		else
-			volume_tags=$(echo $VOLUMES | jq -r '.Volumes[] | select(.Tags) | {(.VolumeId | tostring):(.Tags | from_entries)}')
-			volume_id=$(echo $volume_tags | jq -r --arg name $name 'select(any(.Name == $name)) | keys | first')
-		fi
+      aws ec2 create-tags $AWS_ARGS --resources $volume_id --tags "Key=Name,Value=$name" 1>&2
+      aws ec2 create-tags $AWS_ARGS --resources $volume_id --tags "Key=Device,Value=$device" 1>&2
+      aws ec2 create-tags $AWS_ARGS --resources $volume_id --tags "Key=FileSystem,Value=$file_system" 1>&2
+      echo "OK" 1>&2
+    else
+      volume_tags=$(echo $VOLUMES | jq -r '.Volumes[] | select(.Tags) | {(.VolumeId | tostring):(.Tags | from_entries)}')
+      volume_id=$(echo $volume_tags | jq -r --arg name $name 'select(any(.Name == $name)) | keys | first')
+    fi
 
-		[ -z "$volume_id" ] && echo "Error occured: can not find the VolumeId" 1>&2 && continue
+		[ -z "$volume_id" ] && echo "Error occured: can not find the VolumeId" 1>&2 && exit 1
 		[ -z "$INSTANCE_ID" ] && echo "Error occured: no InstanceId" 1>&2 && exit 1
 
-		device=$(echo $snapshot | jq -r --arg name $name '.Snapshots[] | select(.Tags) | .Tags | from_entries | select(.Name == $name) | .Device')
 
 		state=$(echo "$VOLUMES" | jq -r ".Volumes[].Attachments[] | select(.VolumeId == \"$volume_id\") | .State")
 
@@ -344,6 +381,7 @@ function create_volume() {
 
 			detached)
 				echo -n "Attaching volume $name ($volume_id)..." 1>&2
+				aws ec2 wait volume-available $AWS_ARGS --no-dry-run --volume-ids $volume_id 1>&2
 			  ;;
 
 			attaching)
@@ -358,6 +396,7 @@ function create_volume() {
 
 			*)
 				echo -n "Attaching volume $name ($volume_id)..." 1>&2
+				aws ec2 wait volume-available $AWS_ARGS --no-dry-run --volume-ids $volume_id 1>&2
 				;;
 		esac
 
@@ -368,6 +407,7 @@ function create_volume() {
 		  --instance-id ${INSTANCE_ID} \
 			--device $device \
 			>/dev/null
+    echo "Done" 1>&2
 	done
 }
 
@@ -423,7 +463,22 @@ instance=$(aws ec2 describe-instances \
   jq -rc '.Reservations[].Instances[] | .InstanceId, .State.Name, .Placement.AvailabilityZone'
 )
 
-readarray -t instance <<< "$instance"
+if command -v readarray >/dev/null 2>&1; then
+  readarray -t instance <<< "$instance"
+else
+  old_instance=$instance
+  instance=()
+
+  OLD_IFS=$IFS
+  IFS=$(echo -en "\n\b")
+  for line in $old_instance
+  do
+    IFS="=" read -r n <<< "$line"
+    IFS=$OLD_IFS
+    instance+=($n)
+  done
+fi
+
 INSTANCE_ID=${instance[0]}
 STATE=${instance[1]}
 ZONE=${instance[2]}
