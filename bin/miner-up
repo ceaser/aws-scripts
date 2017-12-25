@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 ################################################################################
 # Config
 ################################################################################
@@ -33,8 +35,9 @@ fi
 #fi
 
 ZONE=
-USER_DATA_PATH="$HOME/.aws-up/user-data"
+if [ -z "$USER_DATA_PATH" ]; then  USER_DATA_PATH="$HOME/.aws-up/user-data"; fi
 CONFIG_PATH="$HOME/.aws-up/config"
+
 if [ -f "$CONFIG_PATH" ]
 then
   . "$CONFIG_PATH"
@@ -180,6 +183,7 @@ fi
 function join_by { local d=$1; shift; echo -n "$1"; shift; printf "%s" "${@/#/$d}"; }
 
 function create_spot_instance() {
+  set -u
   echo "Getting current spot pricing a $SPOT_PRODUCT_DESCRIPTION: '$INSTANCE_TYPE'" 1>&2
   PRICE_AND_ZONE=$(aws ec2 describe-spot-price-history \
     $AWS_ARGS --no-dry-run \
@@ -229,13 +233,13 @@ function create_spot_instance() {
     jq -r '.Subnets[0].SubnetId'
   )
   [ -z "$SUBNET_ID" ] && echo "Could not find a subnet" 1>&2 && exit 1
-  echo $SUBNET 1>&2
+  echo $SUBNET_ID 1>&2
 
 
 	if [ -f "$USER_DATA_PATH" ]
 	then
     echo "Using user-data file at $USER_DATA_PATH" 1>&2
-    USER_DATA="$(cat $USER_DATA_PATH)"
+    USER_DATA="$(cat $USER_DATA_PATH | base64 -w 0)"
 	fi
 
   echo -n "Requesting spot instance..." 1>&2
@@ -272,9 +276,12 @@ function create_spot_instance() {
     jq --raw-output '.SpotInstanceRequests[0].InstanceId'
   )
   echo "$INSTANCE_ID" 1>&2
+
+  set +u
 }
 
 create_ondemand_instance() {
+  set -u
 	if [ -f "$USER_DATA_PATH" ]
 	then
     echo "Using user-data file at $USER_DATA_PATH" 1>&2
@@ -301,9 +308,11 @@ create_ondemand_instance() {
   echo "Waiting for instance to exist" 1>&2
   aws ec2 wait instance-exists $AWS_ARGS --no-dry-run --instance-ids $INSTANCE_ID 1>&2
   [ "$?" != "0" ] && exit 1
+  set +u
 }
 
 function create_tags() {
+  set -u
 	[ -z "$INSTANCE_ID" ] && echo "Can not create tags. Instance ID is blank" 1>&2 && exit 1
   ################################################################################
   # create tags
@@ -321,9 +330,11 @@ function create_tags() {
       aws ec2 create-tags $AWS_ARGS --no-dry-run --resources $INSTANCE_ID --tags "Key=$tag_name,Value=$v" 1>&2
     fi
   done
+  set +u
 }
 
 function delete_tags() {
+  set -u
 	[ -z "$INSTANCE_ID" ] && echo "Can not create tags. Instance ID is blank" 1>&2 && exit 1
   ################################################################################
   # Delete tags
@@ -341,9 +352,11 @@ function delete_tags() {
       aws ec2 delete-tags $AWS_ARGS --no-dry-run --resources $INSTANCE_ID --tags "Key=$tag_name,Value=$v" 1>&2
     fi
   done
+  set +u
 }
 
 function create_volume() {
+  set -u
 	local snapshot_id
 	local name
 	local state
@@ -358,7 +371,9 @@ function create_volume() {
 		$AWS_ARGS --no-dry-run \
 		--owner-ids="$ACCOUNT_ID" \
 		| \
-		jq -r '.Snapshots[] | .Tags[] | select(.Key == "Name" ) | .Value'
+		jq -r '.Snapshots[] | .Tags[] | select(.Key == "Name" ) | .Value' \
+    | \
+    uniq
 		)
 	do
 		# Get the latest snapshot
@@ -398,9 +413,9 @@ function create_volume() {
 		# AWS adds " to the progress
 		[ "$progress" == "100%" ] || (echo "The latest snapshot of $name ($desc) is not complete. $progress"  && continue)
 
-    device=$(echo $snapshot | jq -r --arg name $name '.Snapshots[] | select(.Tags) | .Tags | from_entries | select(.Name == $name) | .Device')
-    file_sytem=$(echo $snapshot | jq -r --arg name $name '.Snapshots[] | select(.Tags) | .Tags | from_entries | select(.Name == $name) | .FileSystem')
-    tags=$(echo $VOLUMES | jq -r --arg name $name '.Volumes[] | select(.Tags) | .Tags | from_entries | select(.Name == $name)')
+    device=$(echo $snapshot | jq -r --arg name $name '.Snapshots[] | select(.Tags) | .Tags | from_entries | select(.Name == $name) | .Device' | head -n1)
+    file_system=$(echo $snapshot | jq -r --arg name $name '.Snapshots[] | select(.Tags) | .Tags | from_entries | select(.Name == $name) | .FileSystem' | head -n1)
+    tags=$(echo $VOLUMES | jq -r --arg name $name '.Volumes[] | select(.Tags) | .Tags | from_entries | select(.Name == $name)' | head -n1)
 
 		# If no tags the volume doesn't exist
 		if [ -z "$tags" ]
@@ -469,9 +484,12 @@ function create_volume() {
 			>/dev/null
     echo "Done" 1>&2
 	done
+
+  set +u
 }
 
 function connect_to_instance() {
+  set -u
   ################################################################################
   # Connect
   ################################################################################
@@ -510,6 +528,7 @@ function connect_to_instance() {
 
   echo "Connecting..." 1>&2
   ssh -oStrictHostKeyChecking=no -oUserKnownHostsFile=/dev/null -i ~/.ssh/$KEY_NAME.pem $SSH_USER@$IP
+  set +u
 }
 
 ################################################################################
