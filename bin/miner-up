@@ -49,7 +49,8 @@ then
   if [ -z "$SECURITY_GROUP_IDS" ]; then echo "SECURITY_GROUP_IDS is required but empty." 1>&2; exit 1; fi
   if [ -z "$KEY_NAME" ]; then echo "KEY_NAME is required but empty." 1>&2; exit 1; fi
   if [ -f "~/.ssh/$KEY_NAME.pem" ]; then echo ""~/.ssh/$KEY_NAME.pem" isn't found." 1>&2; exit 1; fi
-  if [ -z "$SUBNET_ID" ]; then echo "SUBNET_ID is required but empty." 1>&2; exit 1; fi
+  if [ "$SPOT_INSTANCE" == "true" ] && [ -z "$VPC_ID" ]; then echo "VPC_ID is required for spot instances but it was empty." 1>&2; exit 1; fi
+  if [ "$SPOT_INSTANCE" != "true" ] && [ -z "$SUBNET_ID" ]; then echo "SUBNET_ID is required but empty." 1>&2; exit 1; fi
   if [ -z "$SSH_USER" ]; then echo "SSH_USER is required but empty." 1>&2; exit 1; fi
 
   # Default region or config region?
@@ -100,14 +101,46 @@ REGION=us-west-2
 # Required.
 INSTANCE_TYPE=t2.nano
 
-# EC2 security group. Multiple groups are seperated by a comma
+# Use Spot Instance or On Demand
+#
+# Optional.
+SPOT_INSTANCE=true
+
+# Product Description determines the type of Spot Instance
+# Valid options are:
+#   Linux/UNIX (Amazon VPC)
+#   Linux/UNIX
+#   SUSE Linux (Amazon VPC)
+#   SUSE Linux
+#   Windows (Amazon VPC)
+#   Windows
+#
+#  Required. If SPOT_INSTANCE is true
+SPOT_PRODUCT_DESCRIPTION="Linux/UNIX (Amazon VPC)"
+
+# Set the spot instance bid price. If empty the current price + %50 is used.
+#
+# Optional.
+#SPOT_PRICE_MAX=0.085
+
+
+# Set the Network to assign Spot instances to.
+#
+# Example to list all vpcs available:
+#
+# aws ec2 describe-vpcs
+#
+# Required. If SPOT_INSTANCE is true
+VPC_ID=
+
+# EC2 security group. Multiple groups are seperated by a spaces in a bash array
 #
 # Example to list security groups available:
 # aws ec2 describe-security-groups | jq '.SecurityGroups[] | { "id": .GroupId, "name": .GroupName, "description": .Description } '
 r
 #
 # Required.
-SECURITY_GROUP_IDS=
+SECURITY_GROUP_IDS=()
 
 # Which key name to use for ssh authentication. If additional keys are
 # required. Create a $USER_DATA_PATH script to add it after
@@ -142,6 +175,9 @@ EOP
 
   exit 0
 fi
+
+#function join_by { local IFS="$1"; shift; echo "$*"; }
+function join_by { local d=$1; shift; echo -n "$1"; shift; printf "%s" "${@/#/$d}"; }
 
 function create_spot_instance() {
   echo "Getting current spot pricing a $SPOT_PRODUCT_DESCRIPTION: '$INSTANCE_TYPE'" 1>&2
@@ -184,15 +220,34 @@ function create_spot_instance() {
     echo "Calculating Spot Price...$SPOT_PRICE_MAX" 1>&2
   fi
   echo "Availablility Zone: $ZONE" 1>&2
-  echo -n "Requesting spot instance..." 1>&2
 
+  echo -n "Subnet: " 1>&2
+  SUBNET_ID=$(aws ec2 describe-subnets \
+    $AWS_ARGS --no-dry-run \
+    --filter "Name=vpc-id,Values=$VPC_ID,Name=availabilityZone,Values=$ZONE" \
+    | \
+    jq -r '.Subnets[0].SubnetId'
+  )
+  [ -z "$SUBNET_ID" ] && echo "Could not find a subnet" 1>&2 && exit 1
+  echo $SUBNET 1>&2
+
+
+	if [ -f "$USER_DATA_PATH" ]
+	then
+    echo "Using user-data file at $USER_DATA_PATH" 1>&2
+    USER_DATA="$(cat $USER_DATA_PATH)"
+	fi
+
+  echo -n "Requesting spot instance..." 1>&2
   SPOT_INSTANCE_ID=$( aws ec2 request-spot-instances \
     $AWS_ARGS \
     --spot-price $SPOT_PRICE_MAX \
     --launch-specification " {
     \"ImageId\": \"$IMAGE_ID\",
-    \"SubnetId\": \"${SUBNET_ID}\",
-    \"SecurityGroupIds\": [\"$SECURITY_GROUP_IDS\"],
+    \"KeyName\": \"$KEY_NAME\",
+    \"UserData\": \"$USER_DATA\",
+    \"SubnetId\": \"$SUBNET_ID\",
+    \"SecurityGroupIds\": [\"$(join_by ', ' ${SECURITY_GROUP_IDS[*]})\"],
     \"InstanceType\": \"$INSTANCE_TYPE\",
     \"Placement\": {
       \"AvailabilityZone\": \"$ZONE\"
@@ -212,7 +267,7 @@ function create_spot_instance() {
   echo -n "Getting instance id..." 1>&2
   INSTANCE_ID=$( aws ec2 describe-spot-instance-requests \
     $AWS_ARGS --no-dry-run \
-    --spot-instance-request-ids "$SPOT_INSTANCE_ID"
+    --spot-instance-request-ids "$SPOT_INSTANCE_ID" \
     | \
     jq --raw-output '.SpotInstanceRequests[0].InstanceId'
   )
@@ -220,6 +275,11 @@ function create_spot_instance() {
 }
 
 create_ondemand_instance() {
+	if [ -f "$USER_DATA_PATH" ]
+	then
+    echo "Using user-data file at $USER_DATA_PATH" 1>&2
+    USER_DATA="--user-data file://$USER_DATA_PATH"
+	fi
   echo -n "Running new instance..." 1>&2
   INSTANCE_ID=$(aws ec2 run-instances \
     $AWS_ARGS  \
@@ -556,13 +616,6 @@ fi
 ################################################################################
 if [ -z "$INSTANCE_ID" ]
 then
-
-	if [ -f "$USER_DATA_PATH" ]
-	then
-    echo "Using user-data file at $USER_DATA_PATH" 1>&2
-    USER_DATA="--user-data file://$USER_DATA_PATH"
-	fi
-
   if [ "$SPOT_INSTANCE" == "true" ]
   then
     create_spot_instance
