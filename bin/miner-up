@@ -265,8 +265,9 @@ function create_spot_instance() {
   echo $SPOT_INSTANCE_ID 1>&2
 
   echo -n "Waiting for instance to be launched... " 1>&2
-  aws ec2 $AWS_ARGS --no-dry-run wait spot-instance-request-fulfilled --spot-instance-request-ids "$SPOT_INSTANCE_ID"
-  [ "$?" != "0" ] && echo "Could not request a spot instance" 1>&2 && exit 1
+	aws ec2 $AWS_ARGS --no-dry-run wait spot-instance-request-fulfilled --spot-instance-request-ids "$SPOT_INSTANCE_ID"
+	[ "$?" != "0" ] && echo "Could not request a spot instance" 1>&2 && exit 1
+	echo "Done" 1>&2
 
   echo -n "Getting instance id..." 1>&2
   INSTANCE_ID=$( aws ec2 describe-spot-instance-requests \
@@ -373,6 +374,8 @@ function create_volume() {
 		| \
 		jq -r '.Snapshots[] | .Tags[] | select(.Key == "Name" ) | .Value' \
     | \
+		sort \
+		| \
     uniq
 		)
 	do
@@ -616,18 +619,67 @@ fi
 ################################################################################
 if [ "$1" == "destroy" ]
 then
-  if [ -z "$INSTANCE_ID" ]; then
-    exit 0
-  fi
+	if [ -z "$INSTANCE_ID" ]; then
+		exit 0
+	fi
 
-  delete_tags
+	#  Get all volumes for the current instance
+	VOLUMES=$(aws ec2 describe-volumes --filter "Name=attachment.instance-id,Values=$INSTANCE_ID" | jq  -r '.')
 
-  echo "Terminating Instance..." 1>&2
-  aws ec2 terminate-instances \
-    $AWS_ARGS \
-    --instance-ids $INSTANCE_ID 2>/dev/null 1>&2
-  exit 0
+	# Get details about the instance
+	INSTANCE=$(aws ec2 describe-instances \
+		$AWS_ARGS --no-dry-run \
+		--instance-ids "$INSTANCE_ID")
 
+	# What is the root device?
+	ROOT_DEVICE_NAME=$(echo $INSTANCE | jq -r '.Reservations[].Instances[].RootDeviceName')
+
+	# Terminate the instance
+  echo -n "Terminating Instance..." 1>&2
+	aws ec2 terminate-instances \
+		$AWS_ARGS \
+		--instance-ids $INSTANCE_ID 2>/dev/null 1>&2
+	aws ec2 $AWS_ARGS --no-dry-run wait instance-terminated --instance-ids "$INSTANCE_ID"
+	delete_tags
+	echo "Done" 1>&2
+
+	# Loop through the volume data and take a snapshot of every volume minus the root volume
+	for volumeId in `echo $VOLUMES | jq '.Volumes | map(.Attachments) | flatten' | grep -o "vol-[a-zA-Z0-9]*"`
+	do
+
+		# Skip if the root drive
+		if [ $(echo $VOLUMES | jq -r --arg vol $volumeId --arg device $ROOT_DEVICE_NAME '.Volumes[] | select(.VolumeId == $vol) | .Attachments | any(.Device == $device)') == "true" ]
+		then
+			continue
+		fi
+
+		# Get current tags
+		VOLUME_NAME=$(echo $VOLUMES | jq -r --arg vol $volumeId '.Volumes[] | select(.VolumeId == $vol) | .Tags | from_entries | .Name')
+		VOLUME_DEVICE=$(echo $VOLUMES | jq -r --arg vol $volumeId '.Volumes[] | select(.VolumeId == $vol) | .Tags | from_entries | .Device')
+		VOLUME_FILESYSTEM=$(echo $VOLUMES | jq -r --arg vol $volumeId '.Volumes[] | select(.VolumeId == $vol) | .Tags | from_entries | .FileSystem')
+		SNAPSHOT_DATE=$(date -u +%Y%m%d%H%M)
+
+
+		# Create snapshot and tags
+    echo -n "Creating a snapshot of $VOLUME_NAME..." 1>&2
+    SNAPSHOT=$(aws ec2 create-snapshot \
+      $AWS_ARGS  \
+      --volume-id ${volumeId} \
+      --description "$VOLUME_NAME.$SNAPSHOT_DATE" \
+      | \
+      jq -r '.SnapshotId')  && \
+      aws ec2 create-tags $AWS_ARGS --resources ${SNAPSHOT} --tags "Key=Name,Value=$VOLUME_NAME" && \
+      aws ec2 create-tags $AWS_ARGS --resources ${SNAPSHOT} --tags "Key=FileSystem,Value=$VOLUME_FILESYSTEM" && \
+      aws ec2 create-tags $AWS_ARGS --resources ${SNAPSHOT} --tags "Key=Device,Value=$VOLUME_DEVICE" && \
+      aws ec2 wait snapshot-completed $AWS_ARGS --no-dry-run --snapshot-ids $SNAPSHOT && \
+      echo "Done" 1>&2 && \
+      echo -n "Deleting volume..." 1>&2 && \
+      aws ec2 delete-volume $AWS_ARGS --volume-id $volumeId && \
+      aws ec2 wait volume-deleted $AWS_ARGS --no-dry-run --volume-ids $volumeId && \
+      echo "Done" 1>&2
+	done
+
+	exit 0
 fi
 
 ################################################################################
@@ -647,3 +699,4 @@ fi
 
 create_volume
 connect_to_instance
+

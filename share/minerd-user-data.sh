@@ -55,6 +55,7 @@ EOP
   [ "$?" != "0" ] && exit
 
   systemctl daemon-reload & systemctl start bitcoind.service
+  echo 'alias b=bitcoin-cli' >> /home/ubuntu/.bashrc
 
 fi
 
@@ -69,7 +70,7 @@ mount /mnt/zcash
 if [ "$?" == "0" ]
 then
   chgrp adm /mnt/zcash/ && chmod g+w /mnt/zcash/
-  zcash-fetch-params[ "$?" != "0" ] && exit
+  [ "$?" != "0" ] && exit
 
   ln -sf /mnt/zcash/zcash-params /home/ubuntu/.zcash-params
   [ "$?" != "0" ] && exit
@@ -92,5 +93,6 @@ then
   [ "$?" != "0" ] && exit
 
   systemctl daemon-reload & systemctl start zcashd.service
+  echo 'alias z=zcash-cli' >> /home/ubuntu/.bashrc
 fi
 
