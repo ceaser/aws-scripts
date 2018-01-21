@@ -1,8 +1,11 @@
 #!/bin/bash
 
 set -x
-LOG_PATH=/root/user-data.sh
+LOG_PATH=/root/user-data.sh.log
 exec &> >(tee -a "$LOG_PATH")
+
+apt-get update
+apt-get install -y wipe
 
 mkdir /mnt/bitcoin /mnt/zcash
 echo "/dev/mapper/vg--bitcoin-lvol0   /mnt/bitcoin/  ext3    defaults        0       0" >> /etc/fstab
