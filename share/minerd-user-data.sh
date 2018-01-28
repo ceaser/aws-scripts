@@ -57,7 +57,7 @@ EOP
     ln -s /mnt/bitcoin/etc/systemd/system/bitcoind.service /etc/systemd/system/bitcoind.service
   [ "$?" != "0" ] && exit
 
-  systemctl daemon-reload & systemctl start bitcoind.service
+  #systemctl daemon-reload & systemctl start bitcoind.service
   echo 'alias b=bitcoin-cli' >> /home/ubuntu/.bashrc
 
 fi
@@ -95,7 +95,8 @@ then
     ln -s /mnt/zcash/etc/systemd/system/zcashd.service /etc/systemd/system/zcashd.service
   [ "$?" != "0" ] && exit
 
-  systemctl daemon-reload & systemctl start zcashd.service
+  #systemctl daemon-reload & systemctl start zcashd.service
   echo 'alias z=zcash-cli' >> /home/ubuntu/.bashrc
 fi
 
+systemctl daemon-reload
